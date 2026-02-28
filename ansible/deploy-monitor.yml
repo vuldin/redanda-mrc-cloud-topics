@@ -1,0 +1,61 @@
+---
+- name: Set node_exporter_arch based on host architecture
+  hosts: redpanda
+  tasks:
+    - name: Set node_exporter_arch based on host architecture
+      ansible.builtin.set_fact:
+        rp_arch: "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+    - name: Include geerlingguy nodeexporter
+      ansible.builtin.include_role:
+        name: geerlingguy.node_exporter
+      vars:
+        node_exporter_arch: "{{ rp_arch }}"
+
+- name: Install Prometheus
+  hosts: monitor
+  roles:
+    - prometheus.prometheus.prometheus
+  vars:
+    prometheus_scrape_configs:
+      - job_name: "redpanda"
+        metrics_path: "/public_metrics"
+        static_configs:
+          - targets: "{{ groups['redpanda'] | default([]) | map('extract', hostvars, 'inventory_hostname') | map('regex_replace', '^(.*)$','\\1:9644') | list }}"
+            labels:
+              cluster: "mrc-cloud-topics"
+      - job_name: "node"
+        metrics_path: "/metrics"
+        static_configs:
+          - targets: "{{ groups['redpanda'] | default([]) | map('extract', hostvars, 'inventory_hostname') | map('regex_replace', '^(.*)$','\\1:9100') | list }}"
+      - job_name: "envoy"
+        metrics_path: "/stats/prometheus"
+        static_configs:
+          - targets: "{{ groups['envoy'] | default([]) | map('extract', hostvars, 'private_ip') | map('regex_replace', '^(.*)$','\\1:9901') | list }}"
+
+- name: Install Grafana
+  hosts: monitor
+  roles:
+    - grafana.grafana.grafana
+  vars:
+    grafana_version: latest
+    grafana_security:
+      admin_user: admin
+      admin_password: "{{ grafana_admin_pass | default('redpanda-mrc', true) }}"
+    grafana_datasources:
+      - name: prometheus
+        type: prometheus
+        access: proxy
+        url: "http://localhost:9090"
+        basicAuth: false
+        isDefault: true
+    grafana_dashboards:
+      - dashboard_id: 1860
+        revision_id: 31
+        datasource: prometheus
+      - dashboard_id: 7496
+        revision_id: 1
+        datasource: prometheus
+      - dashboard_id: 18135
+        revision_id: 1
+        datasource: prometheus
+    grafana_dashboards_dir: "dashboards/"

@@ -1,0 +1,16 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+
+# Ansible artifacts (downloaded collections, roles, generated inventory)
+artifacts/
+
+# Secrets
+redpanda.license
+*.pem
+*.key
+
+# Claude
+.claude/

@@ -1,0 +1,37 @@
+---
+- name: Provision Redpanda MRC cluster
+  hosts: redpanda
+  vars:
+    advertise_public_ips: false
+    redpanda_version: "{{ lookup('env', 'REDPANDA_VERSION') | default('25.3.9-1', true) }}"
+
+    # Seed servers: first broker from each region
+    # These are set in the inventory via envoy_endpoint and private_ip
+    redpanda_rack: "{{ rack }}"
+    enable_rack_awareness: true
+
+    # Cloud storage via Envoy proxy
+    cloud_storage_enabled: true
+    cloud_storage_credentials_source: aws_instance_metadata
+    cloud_storage_region: "{{ cloud_storage_region }}"
+    cloud_storage_disable_tls: true
+    cloud_storage_api_endpoint: "{{ envoy_endpoint.split(':')[0] }}"
+    cloud_storage_api_endpoint_port: "{{ envoy_endpoint.split(':')[1] }}"
+    cloud_storage_bucket: "none"
+
+    # WAN-tuned Raft settings
+    raft_heartbeat_interval_ms: 500
+    election_timeout_ms: 5000
+
+  tasks:
+    - name: Install system prereqs
+      ansible.builtin.include_role:
+        name: redpanda.cluster.system_setup
+
+    - name: Handle sysctl changes
+      ansible.builtin.include_role:
+        name: redpanda.cluster.sysctl_setup
+
+    - name: Install and start Redpanda
+      ansible.builtin.include_role:
+        name: redpanda.cluster.redpanda_broker

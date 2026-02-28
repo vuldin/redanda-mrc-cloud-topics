@@ -1,0 +1,143 @@
+---
+- name: Deploy workload generators
+  hosts: client
+  become: true
+  vars:
+    redpanda_version: "{{ lookup('env', 'REDPANDA_VERSION') | default('25.3.9-1', true) }}"
+    topic_name: "demo-cloud-topic"
+    message_size: 1024
+    produce_rate: 100
+  tasks:
+    - name: Install dependencies
+      ansible.builtin.apt:
+        name:
+          - unzip
+          - curl
+        state: present
+        update_cache: true
+
+    - name: Install rpk
+      ansible.builtin.shell: |
+        curl -LO https://github.com/redpanda-data/redpanda/releases/latest/download/rpk-linux-amd64.zip
+        unzip -o rpk-linux-amd64.zip -d /usr/local/bin/
+        chmod +x /usr/local/bin/rpk
+      args:
+        creates: /usr/local/bin/rpk
+
+    - name: Configure rpk profile
+      ansible.builtin.shell: |
+        rpk profile create mrc --set brokers={{ broker_ip }}:9092 --set admin_api.addresses={{ broker_ip }}:9644
+      become: false
+      changed_when: true
+
+    - name: Create producer script
+      ansible.builtin.copy:
+        dest: /home/{{ ansible_user }}/producer.sh
+        mode: "0755"
+        owner: "{{ ansible_user }}"
+        content: |
+          #!/bin/bash
+          # Continuous producer for cloud topics demo
+          # Region: {{ rack }}
+          BROKER="{{ broker_ip }}:9092"
+          TOPIC="{{ topic_name }}"
+          MSG_SIZE={{ message_size }}
+          RATE={{ produce_rate }}
+
+          echo "Starting producer in {{ rack }} -> $BROKER"
+          echo "Topic: $TOPIC, Rate: $RATE msg/s, Size: $MSG_SIZE bytes"
+
+          i=0
+          while true; do
+            # Generate payload with region and sequence info
+            PAYLOAD=$(printf '{"region":"{{ rack }}","seq":%d,"ts":"%s","data":"%s"}' \
+              $i "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
+              "$(head -c $MSG_SIZE /dev/urandom | base64 | head -c $MSG_SIZE)")
+
+            echo "$PAYLOAD" | rpk topic produce "$TOPIC" \
+              --brokers "$BROKER" \
+              -k "{{ rack }}-$((i % 6))" 2>/dev/null
+
+            i=$((i + 1))
+
+            # Rate limiting
+            if [ $((i % RATE)) -eq 0 ]; then
+              sleep 1
+            fi
+          done
+
+    - name: Create consumer script
+      ansible.builtin.copy:
+        dest: /home/{{ ansible_user }}/consumer.sh
+        mode: "0755"
+        owner: "{{ ansible_user }}"
+        content: |
+          #!/bin/bash
+          # Consumer with follower fetching (client.rack set to local region)
+          BROKER="{{ broker_ip }}:9092"
+          TOPIC="{{ topic_name }}"
+          GROUP="mrc-consumer-{{ rack }}"
+
+          echo "Starting consumer in {{ rack }} -> $BROKER"
+          echo "Topic: $TOPIC, Group: $GROUP"
+          echo "Client rack: {{ rack }} (enables follower fetching)"
+
+          rpk topic consume "$TOPIC" \
+            --brokers "$BROKER" \
+            --group "$GROUP" \
+            -f '%v\n' 2>/dev/null | while read -r line; do
+              echo "[{{ rack }}] $(date -u +%H:%M:%S) $line" | head -c 200
+              echo
+          done
+
+    - name: Create systemd service for producer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mrc-producer.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=MRC Cloud Topics Producer ({{ rack }})
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ ansible_user }}
+          ExecStart=/home/{{ ansible_user }}/producer.sh
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Create systemd service for consumer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mrc-consumer.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=MRC Cloud Topics Consumer ({{ rack }})
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ ansible_user }}
+          ExecStart=/home/{{ ansible_user }}/consumer.sh
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start producer
+      ansible.builtin.systemd:
+        name: mrc-producer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Enable and start consumer
+      ansible.builtin.systemd:
+        name: mrc-consumer
+        enabled: true
+        state: started
+        daemon_reload: true

@@ -1,0 +1,20 @@
+# Redpanda configuration for Cloud Topics with Envoy SigV4A proxy
+# This template is applied AFTER the redpanda.cluster.redpanda_broker role
+# to override cloud storage settings for the MRAP/Envoy architecture.
+
+redpanda:
+  # Cloud storage pointing to local Envoy proxy (SigV4 -> SigV4A translation)
+  cloud_storage_enabled: true
+  cloud_storage_disable_tls: true
+  cloud_storage_api_endpoint: "{{ envoy_endpoint.split(':')[0] }}"
+  cloud_storage_api_endpoint_port: {{ envoy_endpoint.split(':')[1] }}
+  cloud_storage_bucket: "none"
+  cloud_storage_region: "{{ cloud_storage_region }}"
+  cloud_storage_credentials_source: aws_instance_metadata
+
+  # Rack awareness (rack = AWS region for follower fetching)
+  enable_rack_awareness: true
+
+  # Tuned Raft settings for WAN latency
+  raft_heartbeat_interval_ms: 500
+  election_timeout_ms: 5000

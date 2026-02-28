@@ -1,0 +1,75 @@
+---
+- name: Configure Cloud Topics
+  hosts: redpanda[0]
+  become: true
+  vars:
+    redpanda_license: "{{ lookup('env', 'REDPANDA_LICENSE') }}"
+  tasks:
+    - name: Wait for cluster to be healthy
+      ansible.builtin.command: rpk cluster health
+      register: cluster_health
+      retries: 30
+      delay: 10
+      until: cluster_health.rc == 0
+      changed_when: false
+
+    - name: Apply enterprise license
+      ansible.builtin.command: rpk cluster license set "{{ redpanda_license }}"
+      when: redpanda_license | length > 0
+      changed_when: true
+
+    - name: Enable cloud topics beta feature
+      ansible.builtin.command: >
+        rpk cluster config set unstable_beta_feature_cloud_topics_enabled true
+      changed_when: true
+
+    - name: Disable standard tiered storage remote write
+      ansible.builtin.command: >
+        rpk cluster config set cloud_storage_enable_remote_write false
+      changed_when: true
+
+    - name: Disable standard tiered storage remote read
+      ansible.builtin.command: >
+        rpk cluster config set cloud_storage_enable_remote_read false
+      changed_when: true
+
+    - name: Create demo cloud topic
+      ansible.builtin.command: >
+        rpk topic create demo-cloud-topic
+        -c redpanda.cloud_topic.enabled=true
+        -c redpanda.leaders.preference=racks:us-east-1
+        -p 6
+      register: topic_create
+      changed_when: "'Created topic' in topic_create.stdout"
+      failed_when:
+        - topic_create.rc != 0
+        - "'TOPIC_ALREADY_EXISTS' not in topic_create.stderr"
+
+    - name: Create multi-region cloud topic (no leader preference)
+      ansible.builtin.command: >
+        rpk topic create demo-global-topic
+        -c redpanda.cloud_topic.enabled=true
+        -p 6
+      register: global_topic_create
+      changed_when: "'Created topic' in global_topic_create.stdout"
+      failed_when:
+        - global_topic_create.rc != 0
+        - "'TOPIC_ALREADY_EXISTS' not in global_topic_create.stderr"
+
+    - name: Show cluster health
+      ansible.builtin.command: rpk cluster health
+      register: final_health
+      changed_when: false
+
+    - name: Display cluster health
+      ansible.builtin.debug:
+        var: final_health.stdout_lines
+
+    - name: Show topic details
+      ansible.builtin.command: rpk topic describe demo-cloud-topic
+      register: topic_details
+      changed_when: false
+
+    - name: Display topic details
+      ansible.builtin.debug:
+        var: topic_details.stdout_lines
