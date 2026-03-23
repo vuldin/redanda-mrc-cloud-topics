@@ -1,0 +1,143 @@
+---
+# Performance test cleanup: collect results, delete topics, restart demo.
+#
+# Usage:
+#   ansible-playbook ansible/perf-test-cleanup.yml
+#   ansible-playbook ansible/perf-test-cleanup.yml --tags collect
+#   ansible-playbook ansible/perf-test-cleanup.yml --tags topics
+#   ansible-playbook ansible/perf-test-cleanup.yml --tags restart_demo
+
+- name: Collect results from all clients
+  hosts: client
+  become: true
+  tags: [collect]
+  tasks:
+    - name: Create local results directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../results/{{ rack }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+
+    - name: Compress results on remote host
+      ansible.builtin.archive:
+        path: /opt/perf-results/
+        dest: /tmp/perf-results-{{ rack }}.tar.gz
+        format: gz
+      register: archive
+
+    - name: Fetch compressed results
+      ansible.builtin.fetch:
+        src: /tmp/perf-results-{{ rack }}.tar.gz
+        dest: "{{ playbook_dir }}/../results/{{ rack }}/perf-results-{{ rack }}.tar.gz"
+        flat: true
+      when: archive is changed
+
+    - name: Clean up remote results
+      ansible.builtin.file:
+        path: /opt/perf-results
+        state: absent
+
+    - name: Clean up remote archive
+      ansible.builtin.file:
+        path: /tmp/perf-results-{{ rack }}.tar.gz
+        state: absent
+
+- name: Collect results from brokers
+  hosts: redpanda
+  become: true
+  tags: [collect]
+  tasks:
+    - name: Check for broker results
+      ansible.builtin.find:
+        paths: /tmp
+        patterns: "*.json,*.txt"
+        contains: ".*perf.*"
+      register: broker_results
+
+    - name: Fetch broker results
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ playbook_dir }}/../results/brokers/"
+        flat: true
+      loop: "{{ broker_results.files }}"
+      when: broker_results.files | length > 0
+
+- name: Delete Data Transforms
+  hosts: redpanda[0]
+  become: true
+  tags: [topics, transforms]
+  tasks:
+    - name: Delete merge-us-to-global transform
+      ansible.builtin.command: rpk transform delete merge-us-to-global
+      changed_when: true
+      failed_when: false
+
+    - name: Delete merge-eu-to-global transform
+      ansible.builtin.command: rpk transform delete merge-eu-to-global
+      changed_when: true
+      failed_when: false
+
+    - name: Delete merge-ap-to-global transform
+      ansible.builtin.command: rpk transform delete merge-ap-to-global
+      changed_when: true
+      failed_when: false
+
+- name: Delete performance test topics
+  hosts: redpanda[0]
+  become: true
+  tags: [topics]
+  vars:
+    perf_topics:
+      - perf-us
+      - perf-eu
+      - perf-kr
+      - perf-global
+      - perf-local-p6
+      - perf-us-p12
+      - perf-us-p24
+      - perf-us-rf3
+  tasks:
+    - name: Delete perf test topics
+      ansible.builtin.command: rpk topic delete {{ item }}
+      loop: "{{ perf_topics }}"
+      register: delete_result
+      changed_when: delete_result.rc == 0
+      failed_when: false
+
+    - name: Show remaining topics
+      ansible.builtin.command: rpk topic list
+      register: topic_list
+      changed_when: false
+
+    - name: Display remaining topics
+      ansible.builtin.debug:
+        var: topic_list.stdout_lines
+
+  become: true
+  tasks:
+      ansible.builtin.template:
+        mode: "0644"
+
+      ansible.builtin.systemd:
+        state: restarted
+
+- name: Restart demo workloads
+  hosts: client
+  become: true
+  tags: [restart_demo]
+  tasks:
+    - name: Enable and start mrc-producer
+      ansible.builtin.systemd:
+        name: mrc-producer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Enable and start mrc-consumer
+      ansible.builtin.systemd:
+        name: mrc-consumer
+        enabled: true
+        state: started
+        daemon_reload: true

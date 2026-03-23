@@ -1,3 +1,8 @@
+variable "gcp_project" {
+  description = "GCP project ID"
+  type        = string
+}
+
 variable "deployment_prefix" {
   description = "Prefix for all resource names"
   type        = string
@@ -10,40 +15,33 @@ variable "owner" {
   default     = "jlp"
 }
 
-variable "ssh_key_name" {
-  description = "Name of the AWS key pair (if pre-existing)"
-  type        = string
-  default     = ""
-}
-
 variable "ssh_public_key_path" {
-  description = "Path to SSH public key for creating a key pair"
+  description = "Path to SSH public key file"
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
 }
 
 variable "ssh_user" {
-  description = "SSH user for EC2 instances (ubuntu for Ubuntu AMI)"
+  description = "SSH username for instances"
   type        = string
   default     = "ubuntu"
 }
 
 variable "broker_instance_type" {
-  description = "EC2 instance type for Redpanda brokers"
+  description = "Machine type for Redpanda broker instances"
   type        = string
-  default     = "i3.large"
+  default     = "n2-standard-4"
 }
 
 variable "client_instance_type" {
-  description = "EC2 instance type for workload generators"
+  description = "Machine type for client instances"
   type        = string
-  default     = "t3.medium"
+  default     = "e2-medium"
 }
 
 variable "monitor_instance_type" {
-  description = "EC2 instance type for monitoring"
+  description = "Machine type for monitoring instance"
   type        = string
-  default     = "t3.medium"
+  default     = "e2-medium"
 }
 
 variable "brokers_per_region" {
@@ -53,13 +51,13 @@ variable "brokers_per_region" {
 }
 
 variable "redpanda_version" {
-  description = "Redpanda version to install"
+  description = "Redpanda version to deploy"
   type        = string
   default     = "25.3.9-1"
 }
 
 variable "allowed_ssh_cidrs" {
-  description = "CIDR blocks allowed SSH access"
+  description = "CIDRs allowed to SSH into instances"
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
@@ -67,32 +65,36 @@ variable "allowed_ssh_cidrs" {
 variable "redpanda_license" {
   description = "Redpanda enterprise license key"
   type        = string
-  default     = ""
   sensitive   = true
+  default     = ""
 }
 
-# Region configuration
 locals {
   regions = {
     us = {
-      region     = "us-east-1"
+      region     = "us-east4"
+      zone       = "us-east4-a"
       vpc_cidr   = "10.0.0.0/16"
       subnet_cidr = "10.0.1.0/24"
-      az         = "us-east-1a"
     }
     eu = {
-      region     = "eu-west-1"
+      region     = "europe-west1"
+      zone       = "europe-west1-b"
       vpc_cidr   = "10.1.0.0/16"
       subnet_cidr = "10.1.1.0/24"
-      az         = "eu-west-1a"
     }
-    ap = {
-      region     = "ap-southeast-1"
+    kr = {
+      region     = "asia-northeast3"
+      zone       = "asia-northeast3-a"
       vpc_cidr   = "10.2.0.0/16"
       subnet_cidr = "10.2.1.0/24"
-      az         = "ap-southeast-1a"
     }
   }
 
-  all_vpc_cidrs = [for r in local.regions : r.vpc_cidr]
+  common_labels = {
+    owner       = var.owner
+    project     = var.deployment_prefix
+    environment = "demo"
+    managed_by  = "terraform"
+  }
 }

@@ -23,27 +23,46 @@
         rpk cluster config set unstable_beta_feature_cloud_topics_enabled true
       changed_when: true
 
-    - name: Disable standard tiered storage remote write
-      ansible.builtin.command: >
-        rpk cluster config set cloud_storage_enable_remote_write false
-      changed_when: true
+    # NOTE: Do NOT disable cloud_storage_enable_remote_write or cloud_storage_enable_remote_read.
+    # Cloud topics requires archival storage to be enabled. Disabling these causes an assertion
+    # failure on startup: 'archival_storage_enabled()' cloud topics currently requires archival
+    # storage to be enabled.
 
-    - name: Disable standard tiered storage remote read
-      ansible.builtin.command: >
-        rpk cluster config set cloud_storage_enable_remote_read false
-      changed_when: true
-
-    - name: Create demo cloud topic
+    - name: Create demo cloud topic (leaders pinned to US)
       ansible.builtin.command: >
         rpk topic create demo-cloud-topic
         -c redpanda.cloud_topic.enabled=true
-        -c redpanda.leaders.preference=racks:us-east-1
+        -c redpanda.leaders.preference=racks:us-east4
         -p 6
       register: topic_create
       changed_when: "'Created topic' in topic_create.stdout"
       failed_when:
         - topic_create.rc != 0
         - "'TOPIC_ALREADY_EXISTS' not in topic_create.stderr"
+
+    - name: Create EU cloud topic (leaders pinned to EU)
+      ansible.builtin.command: >
+        rpk topic create demo-eu-topic
+        -c redpanda.cloud_topic.enabled=true
+        -c redpanda.leaders.preference=racks:europe-west1
+        -p 6
+      register: eu_topic_create
+      changed_when: "'Created topic' in eu_topic_create.stdout"
+      failed_when:
+        - eu_topic_create.rc != 0
+        - "'TOPIC_ALREADY_EXISTS' not in eu_topic_create.stderr"
+
+    - name: Create Korea cloud topic (leaders pinned to Korea)
+      ansible.builtin.command: >
+        rpk topic create demo-kr-topic
+        -c redpanda.cloud_topic.enabled=true
+        -c redpanda.leaders.preference=racks:asia-northeast3
+        -p 6
+      register: kr_topic_create
+      changed_when: "'Created topic' in kr_topic_create.stdout"
+      failed_when:
+        - kr_topic_create.rc != 0
+        - "'TOPIC_ALREADY_EXISTS' not in kr_topic_create.stderr"
 
     - name: Create multi-region cloud topic (no leader preference)
       ansible.builtin.command: >

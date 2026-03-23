@@ -1,20 +1,22 @@
-# Redpanda configuration for Cloud Topics with Envoy SigV4A proxy
-# This template is applied AFTER the redpanda.cluster.redpanda_broker role
-# to override cloud storage settings for the MRAP/Envoy architecture.
-
-redpanda:
-  # Cloud storage pointing to local Envoy proxy (SigV4 -> SigV4A translation)
-  cloud_storage_enabled: true
-  cloud_storage_disable_tls: true
-  cloud_storage_api_endpoint: "{{ envoy_endpoint.split(':')[0] }}"
-  cloud_storage_api_endpoint_port: {{ envoy_endpoint.split(':')[1] }}
-  cloud_storage_bucket: "none"
-  cloud_storage_region: "{{ cloud_storage_region }}"
-  cloud_storage_credentials_source: aws_instance_metadata
-
-  # Rack awareness (rack = AWS region for follower fetching)
-  enable_rack_awareness: true
-
-  # Tuned Raft settings for WAN latency
-  raft_heartbeat_interval_ms: 500
-  election_timeout_ms: 5000
+# Redpanda configuration for Cloud Topics with GCS
+# This template documents the expected cloud storage config.
+# The redpanda.cluster.redpanda_broker role auto-configures cloud storage
+# when tiered_storage_bucket_name is set and cloud_storage_credentials_source
+# is gcp_instance_metadata. The role auto-sets:
+#   cloud_storage_enabled: true
+#   cloud_storage_api_endpoint: storage.googleapis.com
+#   cloud_storage_bucket: <tiered_storage_bucket_name>
+#
+# The following is for reference / manual override if needed:
+#
+# redpanda:
+#   cloud_storage_enabled: true
+#   cloud_storage_disable_tls: false
+#   cloud_storage_api_endpoint: storage.googleapis.com
+#   cloud_storage_api_endpoint_port: 443
+#   cloud_storage_bucket: "{{ gcs_bucket_name }}"
+#   cloud_storage_region: "{{ cloud_storage_region }}"
+#   cloud_storage_credentials_source: gcp_instance_metadata
+#   enable_rack_awareness: true
+#   raft_heartbeat_interval_ms: 500
+#   election_timeout_ms: 5000

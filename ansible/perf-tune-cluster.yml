@@ -1,0 +1,160 @@
+---
+# Redpanda cluster tuning for performance testing.
+# Applies cloud storage, Kafka API, topic-level, and system tuning.
+#
+# Usage:
+#   ansible-playbook ansible/perf-tune-cluster.yml
+#   ansible-playbook ansible/perf-tune-cluster.yml --tags cloud_storage
+#   ansible-playbook ansible/perf-tune-cluster.yml --tags kafka_api
+#   ansible-playbook ansible/perf-tune-cluster.yml --tags system
+#   ansible-playbook ansible/perf-tune-cluster.yml --tags topics
+
+- name: Apply Redpanda cloud storage tuning
+  hosts: redpanda[0]
+  become: true
+  tags: [cloud_storage]
+  tasks:
+    - name: Wait for cluster health
+      ansible.builtin.command: rpk cluster health
+      register: cluster_health
+      retries: 10
+      delay: 10
+      until: cluster_health.rc == 0
+      changed_when: false
+
+    # Properties that do NOT require restart
+    - name: Set cloud_storage_cache_size_percent to 70
+      ansible.builtin.command: rpk cluster config set cloud_storage_cache_size_percent 70
+      changed_when: true
+
+    - name: Set cloud_storage_chunk_prefetch to 2
+      ansible.builtin.command: rpk cluster config set cloud_storage_chunk_prefetch 2
+      changed_when: true
+
+    - name: Set cloud_storage_segment_max_upload_interval_sec to 600
+      ansible.builtin.command: rpk cluster config set cloud_storage_segment_max_upload_interval_sec 600
+      changed_when: true
+
+    - name: Set cloud_storage_upload_ctrl_max_shares to 2000
+      ansible.builtin.command: rpk cluster config set cloud_storage_upload_ctrl_max_shares 2000
+      changed_when: true
+
+    - name: Set cloud_storage_upload_ctrl_min_shares to 500
+      ansible.builtin.command: rpk cluster config set cloud_storage_upload_ctrl_min_shares 500
+      changed_when: true
+
+    - name: Set cloud_storage_segment_upload_timeout_ms to 120000
+      ansible.builtin.command: rpk cluster config set cloud_storage_segment_upload_timeout_ms 120000
+      changed_when: true
+
+    - name: Set cloud_storage_throughput_limit_percent to 80
+      ansible.builtin.command: rpk cluster config set cloud_storage_throughput_limit_percent 80
+      changed_when: true
+
+    # Properties that REQUIRE restart
+    - name: Set cloud_storage_max_connections to 40
+      ansible.builtin.command: rpk cluster config set cloud_storage_max_connections 40
+      changed_when: true
+
+    - name: Set cloud_storage_cache_chunk_size to 33554432
+      ansible.builtin.command: rpk cluster config set cloud_storage_cache_chunk_size 33554432
+      changed_when: true
+
+    - name: Note restart required
+      ansible.builtin.debug:
+        msg: >
+          cloud_storage_max_connections and cloud_storage_cache_chunk_size
+          require a rolling restart. Run the restart play or restart manually.
+
+- name: Apply Kafka API tuning
+  hosts: redpanda[0]
+  become: true
+  tags: [kafka_api]
+  tasks:
+    - name: Set kafka_batch_max_bytes to 4MB
+      ansible.builtin.command: rpk cluster config set kafka_batch_max_bytes 4194304
+      changed_when: true
+
+    - name: Set fetch_max_bytes to 100MB
+      ansible.builtin.command: rpk cluster config set fetch_max_bytes 104857600
+      changed_when: true
+
+- name: Apply topic-level tuning for perf topics
+  hosts: redpanda[0]
+  become: true
+  tags: [topics]
+  tasks:
+    - name: Enable write caching on perf-us
+      ansible.builtin.command: rpk topic alter-config perf-us -s write.caching=true
+      register: result
+      failed_when: result.rc != 0 and 'UNKNOWN_TOPIC_OR_PARTITION' not in result.stderr
+      changed_when: result.rc == 0
+
+    - name: Enable write caching on perf-eu
+      ansible.builtin.command: rpk topic alter-config perf-eu -s write.caching=true
+      register: result
+      failed_when: result.rc != 0 and 'UNKNOWN_TOPIC_OR_PARTITION' not in result.stderr
+      changed_when: result.rc == 0
+
+    - name: Enable write caching on perf-kr
+      ansible.builtin.command: rpk topic alter-config perf-kr -s write.caching=true
+      register: result
+      failed_when: result.rc != 0 and 'UNKNOWN_TOPIC_OR_PARTITION' not in result.stderr
+      changed_when: result.rc == 0
+
+- name: Apply system-level tuning on brokers
+  hosts: redpanda
+  become: true
+  tags: [system]
+  tasks:
+    - name: Run rpk redpanda tune all
+      ansible.builtin.command: rpk redpanda tune all
+      changed_when: true
+      failed_when: false
+
+    - name: Tune network buffer sizes (rmem_max)
+      ansible.posix.sysctl:
+        name: net.core.rmem_max
+        value: "16777216"
+        sysctl_set: true
+        state: present
+
+    - name: Tune network buffer sizes (wmem_max)
+      ansible.posix.sysctl:
+        name: net.core.wmem_max
+        value: "16777216"
+        sysctl_set: true
+        state: present
+
+    - name: Tune TCP read memory
+      ansible.posix.sysctl:
+        name: net.ipv4.tcp_rmem
+        value: "4096 87380 16777216"
+        sysctl_set: true
+        state: present
+
+    - name: Tune TCP write memory
+      ansible.posix.sysctl:
+        name: net.ipv4.tcp_wmem
+        value: "4096 87380 16777216"
+        sysctl_set: true
+        state: present
+
+- name: Rolling restart brokers (if cloud storage restart-required properties changed)
+  hosts: redpanda
+  become: true
+  serial: 1
+  tags: [restart]
+  tasks:
+    - name: Restart Redpanda
+      ansible.builtin.systemd:
+        name: redpanda
+        state: restarted
+
+    - name: Wait for broker to rejoin
+      ansible.builtin.command: rpk cluster health
+      register: health
+      retries: 30
+      delay: 10
+      until: health.rc == 0
+      changed_when: false

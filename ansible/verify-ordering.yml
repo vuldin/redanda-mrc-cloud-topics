@@ -1,0 +1,458 @@
+---
+# Ordering & Consistency Verification for Cloud Topics + S3 CRR.
+#
+# Tests whether cross-region reads via follower brokers (which read from
+# remote S3 buckets populated by CRR) maintain record ordering guarantees.
+#
+# Usage:
+#   ansible-playbook ansible/verify-ordering.yml
+#   ansible-playbook ansible/verify-ordering.yml --tags test_a
+#   ansible-playbook ansible/verify-ordering.yml --tags test_b
+#   ansible-playbook ansible/verify-ordering.yml --tags test_c
+#   ansible-playbook ansible/verify-ordering.yml --tags test_d
+#   ansible-playbook ansible/verify-ordering.yml --tags report
+#
+# Override variables:
+#   ansible-playbook ansible/verify-ordering.yml -e "verify_count=50000 crr_delay=180"
+
+# ============================================================
+# Play 1: Create fresh verification topics
+# ============================================================
+
+- name: "Setup: Create fresh verification topics"
+  hosts: redpanda[0]
+  become: true
+  tags: [setup, test_a, test_b, test_c, test_d]
+  vars:
+    verify_topics:
+      - name: verify-us
+        leader_pref: "racks:us-east4"
+      - name: verify-eu
+        leader_pref: "racks:europe-west1"
+      - name: verify-ap
+        leader_pref: "racks:asia-northeast3"
+    verify_partitions: 6
+  tasks:
+    - name: Delete existing verification topics
+      ansible.builtin.command: rpk topic delete {{ item.name }}
+      loop: "{{ verify_topics }}"
+      register: delete_result
+      changed_when: delete_result.rc == 0
+      failed_when: false
+
+    - name: Wait for topic deletion to propagate
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Create verification topics (cloud topic + leader preference)
+      ansible.builtin.command: >
+        rpk topic create {{ item.name }}
+        -p {{ verify_partitions }}
+        -c redpanda.cloud_topic.enabled=true
+        -c redpanda.leaders.preference={{ item.leader_pref }}
+      loop: "{{ verify_topics }}"
+      register: topic_create
+      changed_when: "'Created topic' in topic_create.stdout"
+      failed_when:
+        - topic_create.rc != 0
+        - "'TOPIC_ALREADY_EXISTS' not in topic_create.stderr"
+
+    - name: Verify topics created
+      ansible.builtin.command: rpk topic list
+      register: topic_list
+      changed_when: false
+
+    - name: Display topics
+      ansible.builtin.debug:
+        var: topic_list.stdout_lines
+
+# ============================================================
+# Play 2: Rebuild mrc-bench on clients (picks up --verify flag)
+# ============================================================
+
+- name: "Setup: Rebuild mrc-bench with verify support"
+  hosts: client
+  become: true
+  tags: [setup, test_a, test_b, test_c, test_d]
+  tasks:
+    - name: Deploy updated bench source
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/bench/"
+        dest: /opt/bench/
+        mode: "0755"
+
+    - name: Rebuild mrc-bench
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin
+        export GOPATH=/root/go
+        cd /opt/bench
+        go build -o /usr/local/bin/mrc-bench .
+      changed_when: true
+
+    - name: Create verify results directory
+      ansible.builtin.file:
+        path: /opt/verify-results
+        state: directory
+        mode: "0755"
+
+# ============================================================
+# Play 3: Test A — Local produce + local consume (US only)
+# ============================================================
+
+- name: "Test A: Local produce + local consume (US only, no CRR)"
+  hosts: client_us
+  become: true
+  tags: [test_a]
+  vars:
+    verify_count: "{{ verify_count | default(10000) }}"
+    record_size: 1024
+    test_name: "test-a-local-us"
+  tasks:
+    - name: "Test A: Produce {{ verify_count }} sequenced records to verify-us"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic verify-us \
+          --record-size {{ record_size }} \
+          --count {{ verify_count }} \
+          --rate 0 \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --verify \
+          --partitions 6 \
+          --output /opt/verify-results/{{ test_name }}-produce.json
+      register: produce_a
+      timeout: 300
+
+    - name: "Test A: Display produce output"
+      ansible.builtin.debug:
+        msg: "{{ produce_a.stderr_lines | default([]) }}"
+
+    - name: "Test A: Consume and verify {{ verify_count }} records from verify-us (local)"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic verify-us \
+          --group verify-a-{{ ansible_date_time.epoch }} \
+          --count {{ verify_count }} \
+          --duration 300s \
+          --verify \
+          --output /opt/verify-results/{{ test_name }}-consume.json
+      register: consume_a
+      timeout: 360
+      failed_when: false
+
+    - name: "Test A: Display consume/verify output"
+      ansible.builtin.debug:
+        msg: "{{ consume_a.stderr_lines | default([]) }}"
+
+    - name: "Test A: Result"
+      ansible.builtin.debug:
+        msg: >-
+          TEST A (Local US, no CRR):
+          {{ 'PASS' if consume_a.rc == 0 else 'FAIL (rc=' + consume_a.rc | string + ')' }}
+
+# ============================================================
+# Play 4: Test B — Cross-region (EU reads US data via CRR)
+# ============================================================
+
+- name: "Test B (produce): US produces to verify-us"
+  hosts: client_us
+  become: true
+  tags: [test_b]
+  vars:
+    verify_count: "{{ verify_count | default(10000) }}"
+    record_size: 1024
+    test_name: "test-b-cross-eu"
+  tasks:
+    - name: "Test B: Produce {{ verify_count }} sequenced records to verify-us"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic verify-us \
+          --record-size {{ record_size }} \
+          --count {{ verify_count }} \
+          --rate 0 \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --verify \
+          --partitions 6 \
+          --output /opt/verify-results/{{ test_name }}-produce.json
+      register: produce_b
+      timeout: 300
+
+    - name: "Test B: Display produce output"
+      ansible.builtin.debug:
+        msg: "{{ produce_b.stderr_lines | default([]) }}"
+
+- name: "Test B (wait): CRR propagation delay"
+  hosts: localhost
+  connection: local
+  tags: [test_b]
+  vars:
+    crr_delay: "{{ crr_delay | default(120) }}"
+  tasks:
+    - name: "Test B: Wait {{ crr_delay }}s for CRR to replicate to EU bucket"
+      ansible.builtin.pause:
+        seconds: "{{ crr_delay }}"
+
+- name: "Test B (consume): EU reads US data via CRR"
+  hosts: client_eu
+  become: true
+  tags: [test_b]
+  vars:
+    verify_count: "{{ verify_count | default(10000) }}"
+    test_name: "test-b-cross-eu"
+  tasks:
+    - name: "Test B: EU consumes and verifies {{ verify_count }} records from verify-us"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic verify-us \
+          --group verify-b-{{ ansible_date_time.epoch }} \
+          --count {{ verify_count }} \
+          --duration 300s \
+          --verify \
+          --output /opt/verify-results/{{ test_name }}-consume.json
+      register: consume_b
+      timeout: 360
+      failed_when: false
+
+    - name: "Test B: Display consume/verify output"
+      ansible.builtin.debug:
+        msg: "{{ consume_b.stderr_lines | default([]) }}"
+
+    - name: "Test B: Result"
+      ansible.builtin.debug:
+        msg: >-
+          TEST B (Cross-region EU reads US data, CRR path):
+          {{ 'PASS' if consume_b.rc == 0 else 'FAIL (rc=' + consume_b.rc | string + ')' }}
+
+# ============================================================
+# Play 5: Test C — Cross-region (AP reads US data, longest CRR leg)
+# ============================================================
+
+- name: "Test C (produce): US produces to verify-us"
+  hosts: client_us
+  become: true
+  tags: [test_c]
+  vars:
+    verify_count: "{{ verify_count | default(10000) }}"
+    record_size: 1024
+    test_name: "test-c-cross-ap"
+  tasks:
+    - name: "Test C: Produce {{ verify_count }} sequenced records to verify-us"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic verify-us \
+          --record-size {{ record_size }} \
+          --count {{ verify_count }} \
+          --rate 0 \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --verify \
+          --partitions 6 \
+          --output /opt/verify-results/{{ test_name }}-produce.json
+      register: produce_c
+      timeout: 300
+
+    - name: "Test C: Display produce output"
+      ansible.builtin.debug:
+        msg: "{{ produce_c.stderr_lines | default([]) }}"
+
+- name: "Test C (wait): CRR propagation delay"
+  hosts: localhost
+  connection: local
+  tags: [test_c]
+  vars:
+    crr_delay: "{{ crr_delay | default(120) }}"
+  tasks:
+    - name: "Test C: Wait {{ crr_delay }}s for CRR to replicate to AP bucket"
+      ansible.builtin.pause:
+        seconds: "{{ crr_delay }}"
+
+- name: "Test C (consume): AP reads US data via CRR"
+  hosts: client_ap
+  become: true
+  tags: [test_c]
+  vars:
+    verify_count: "{{ verify_count | default(10000) }}"
+    test_name: "test-c-cross-ap"
+  tasks:
+    - name: "Test C: AP consumes and verifies {{ verify_count }} records from verify-us"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic verify-us \
+          --group verify-c-{{ ansible_date_time.epoch }} \
+          --count {{ verify_count }} \
+          --duration 300s \
+          --verify \
+          --output /opt/verify-results/{{ test_name }}-consume.json
+      register: consume_c
+      timeout: 360
+      failed_when: false
+
+    - name: "Test C: Display consume/verify output"
+      ansible.builtin.debug:
+        msg: "{{ consume_c.stderr_lines | default([]) }}"
+
+    - name: "Test C: Result"
+      ansible.builtin.debug:
+        msg: >-
+          TEST C (Cross-region AP reads US data, longest CRR leg):
+          {{ 'PASS' if consume_c.rc == 0 else 'FAIL (rc=' + consume_c.rc | string + ')' }}
+
+# ============================================================
+# Play 6: Test D — All regions local produce + consume in parallel
+# ============================================================
+
+- name: "Test D: All regions produce locally (parallel)"
+  hosts: client
+  become: true
+  tags: [test_d]
+  vars:
+    verify_count: "{{ verify_count | default(10000) }}"
+    record_size: 1024
+    topic_map:
+      us-east4: verify-us
+      europe-west1: verify-eu
+      asia-northeast3: verify-ap
+  tasks:
+    - name: "Test D: Produce {{ verify_count }} sequenced records to local topic"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TOPIC="{{ topic_map[rack] }}"
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic "$TOPIC" \
+          --record-size {{ record_size }} \
+          --count {{ verify_count }} \
+          --rate 0 \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --verify \
+          --partitions 6 \
+          --output /opt/verify-results/test-d-{{ rack }}-produce.json
+      register: produce_d
+      timeout: 300
+
+    - name: "Test D: Display produce output"
+      ansible.builtin.debug:
+        msg: "{{ produce_d.stderr_lines | default([]) }}"
+
+- name: "Test D: All regions consume locally (parallel)"
+  hosts: client
+  become: true
+  tags: [test_d]
+  vars:
+    verify_count: "{{ verify_count | default(10000) }}"
+    topic_map:
+      us-east4: verify-us
+      europe-west1: verify-eu
+      asia-northeast3: verify-ap
+  tasks:
+    - name: "Test D: Consume and verify {{ verify_count }} records from local topic"
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TOPIC="{{ topic_map[rack] }}"
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic "$TOPIC" \
+          --group verify-d-{{ rack }}-{{ ansible_date_time.epoch }} \
+          --count {{ verify_count }} \
+          --duration 300s \
+          --verify \
+          --output /opt/verify-results/test-d-{{ rack }}-consume.json
+      register: consume_d
+      timeout: 360
+      failed_when: false
+
+    - name: "Test D: Display consume/verify output"
+      ansible.builtin.debug:
+        msg: "{{ consume_d.stderr_lines | default([]) }}"
+
+    - name: "Test D: Result"
+      ansible.builtin.debug:
+        msg: >-
+          TEST D ({{ rack }} local, no CRR):
+          {{ 'PASS' if consume_d.rc == 0 else 'FAIL (rc=' + consume_d.rc | string + ')' }}
+
+# ============================================================
+# Play 7: Report — Fetch and summarize all results
+# ============================================================
+
+- name: "Report: Collect and summarize verification results"
+  hosts: client
+  become: true
+  tags: [report]
+  tasks:
+    - name: Find all verification result files
+      ansible.builtin.find:
+        paths: /opt/verify-results
+        patterns: "*.json"
+      register: result_files
+
+    - name: Read verification result files
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      loop: "{{ result_files.files }}"
+      register: result_contents
+      when: result_files.files | length > 0
+
+    - name: Display results for this host
+      ansible.builtin.debug:
+        msg: |
+          === {{ inventory_hostname }} ({{ rack }}) ===
+          {% for item in result_contents.results | default([]) %}
+          {% if item.content is defined %}
+          {% set data = item.content | b64decode | from_json %}
+          File: {{ item.item.path | basename }}
+          {% if data.verify is defined %}
+            Verify: {{ 'PASS' if data.pass else 'FAIL' }}
+            Records: {{ data.total_records }}
+            {% for pid, pdata in (data.partitions | default({})).items() %}
+            Partition {{ pid }}: {{ pdata.status }} (total={{ pdata.total }} gaps={{ pdata.gaps }} dups={{ pdata.duplicates }} ooo={{ pdata.out_of_order }})
+            {% endfor %}
+          {% else %}
+            Records: {{ data.total_records | default(data.total_sent | default('N/A')) }}
+            Rate: {{ data.avg_rate_msg_s | default('N/A') }} msg/s
+          {% endif %}
+          ---
+          {% endif %}
+          {% endfor %}
+      when: result_contents.results is defined
+
+- name: "Report: Summary"
+  hosts: localhost
+  connection: local
+  tags: [report]
+  tasks:
+    - name: Print test matrix summary
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════╗
+          ║           ORDERING VERIFICATION SUMMARY                     ║
+          ╠══════════════════════════════════════════════════════════════╣
+          ║ Test A: Local US produce + consume (no CRR)   → Baseline   ║
+          ║ Test B: US produce → EU consume (CRR path)    → CRR test   ║
+          ║ Test C: US produce → AP consume (longest CRR)  → CRR test  ║
+          ║ Test D: Each region local (parallel, no CRR)  → Baseline   ║
+          ╠══════════════════════════════════════════════════════════════╣
+          ║ Tests A & D should always PASS (no CRR involved).          ║
+          ║ Tests B & C may FAIL if CRR violates ordering.             ║
+          ║                                                             ║
+          ║ Check JSON files in /opt/verify-results/ on each client     ║
+          ║ for per-partition verification detail.                       ║
+          ╚══════════════════════════════════════════════════════════════╝

@@ -13,7 +13,7 @@ log() { echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} $*"; }
 warn() { echo -e "${YELLOW}[$(date '+%H:%M:%S')] WARNING:${NC} $*"; }
 
 echo ""
-warn "This will destroy ALL MRC Cloud Topics demo infrastructure!"
+warn "This will destroy ALL MRC Cloud Topics demo infrastructure on GCP!"
 echo ""
 read -p "Are you sure? (yes/no): " confirm
 if [ "$confirm" != "yes" ]; then
@@ -27,7 +27,7 @@ terraform destroy -auto-approve
 
 log "Cleaning up generated artifacts..."
 rm -f "$PROJECT_DIR/artifacts/hosts_mrc.ini"
-rm -f "$PROJECT_DIR/artifacts/envoy_vars.yml"
+rm -f "$PROJECT_DIR/artifacts/gcs_vars.yml"
 
 echo ""
 log "Teardown complete."

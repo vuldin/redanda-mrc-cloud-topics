@@ -14,3 +14,6 @@ redpanda.license
 
 # Claude
 .claude/
+
+# builds
+redpanda*.deb

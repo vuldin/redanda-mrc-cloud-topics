@@ -1,0 +1,271 @@
+---
+# Performance test setup: stop demo workloads, install tools, create topics.
+#
+# Usage:
+#   ansible-playbook ansible/perf-test-setup.yml
+#   ansible-playbook ansible/perf-test-setup.yml --tags tools
+#   ansible-playbook ansible/perf-test-setup.yml --tags topics
+#   ansible-playbook ansible/perf-test-setup.yml --tags transform
+
+- name: Stop demo workloads
+  hosts: client
+  become: true
+  tags: [stop_demo]
+  tasks:
+    - name: Stop mrc-producer service
+      ansible.builtin.systemd:
+        name: mrc-producer
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop mrc-consumer service
+      ansible.builtin.systemd:
+        name: mrc-consumer
+        state: stopped
+        enabled: false
+      failed_when: false
+
+- name: Install performance tools on clients
+  hosts: client
+  become: true
+  tags: [tools]
+  tasks:
+    - name: Install system dependencies
+      ansible.builtin.apt:
+        name:
+          - iperf3
+          - build-essential
+          - git
+          - jq
+          - bc
+          - sysstat
+        state: present
+        update_cache: true
+
+    - name: Install Go 1.22
+      ansible.builtin.shell: |
+        if go version 2>/dev/null | grep -q 'go1.22'; then
+          echo "Go 1.22 already installed"
+          exit 0
+        fi
+        wget -q https://go.dev/dl/go1.22.8.linux-amd64.tar.gz -O /tmp/go.tar.gz
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf /tmp/go.tar.gz
+        rm /tmp/go.tar.gz
+      args:
+        creates: /usr/local/go/bin/go
+
+    - name: Add Go to PATH
+      ansible.builtin.copy:
+        dest: /etc/profile.d/go.sh
+        mode: "0644"
+        content: |
+          export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+          export GOPATH=/root/go
+
+    - name: Install kcat
+      ansible.builtin.apt:
+        name: kafkacat
+        state: present
+      failed_when: false
+
+    - name: Build kgo-verifier
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin
+        export GOPATH=/root/go
+        if [ -f /usr/local/bin/kgo-verifier ]; then
+          echo "kgo-verifier already installed"
+          exit 0
+        fi
+        cd /tmp
+        git clone --depth 1 https://github.com/redpanda-data/kgo-verifier.git
+        cd kgo-verifier
+        go build -o /usr/local/bin/kgo-verifier ./...
+        rm -rf /tmp/kgo-verifier
+      args:
+        creates: /usr/local/bin/kgo-verifier
+
+    - name: Deploy franz-go bench binary source
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/bench/"
+        dest: /opt/bench/
+        mode: "0755"
+
+    - name: Build franz-go bench binary
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin
+        export GOPATH=/root/go
+        cd /opt/bench
+        go build -o /usr/local/bin/mrc-bench .
+      args:
+        creates: /usr/local/bin/mrc-bench
+
+    - name: Create results directory
+      ansible.builtin.file:
+        path: /opt/perf-results
+        state: directory
+        mode: "0755"
+        owner: root
+
+    - name: Install rpk (if not present)
+      ansible.builtin.shell: |
+        if command -v rpk &>/dev/null; then
+          echo "rpk already installed"
+          exit 0
+        fi
+        curl -LO https://github.com/redpanda-data/redpanda/releases/latest/download/rpk-linux-amd64.zip
+        unzip -o rpk-linux-amd64.zip -d /usr/local/bin/
+        chmod +x /usr/local/bin/rpk
+        rm -f rpk-linux-amd64.zip
+      args:
+        creates: /usr/local/bin/rpk
+
+    - name: Configure rpk profile
+      ansible.builtin.shell: |
+        rpk profile create mrc --set brokers={{ broker_ip }}:9092 --set admin_api.addresses={{ broker_ip }}:9644 || true
+      become: false
+      changed_when: true
+
+- name: Install broker-side tools
+  hosts: redpanda
+  become: true
+  tags: [tools]
+  tasks:
+    - name: Install fio for NVMe benchmarking
+      ansible.builtin.apt:
+        name:
+          - fio
+          - iperf3
+          - sysstat
+        state: present
+        update_cache: true
+
+- name: Create performance test topics
+  hosts: redpanda[0]
+  become: true
+  tags: [topics]
+  vars:
+    topics:
+      - name: perf-us
+        partitions: 6
+        cloud_topic: true
+        leader_pref: "racks:us-east4"
+      - name: perf-eu
+        partitions: 6
+        cloud_topic: true
+        leader_pref: "racks:europe-west1"
+      - name: perf-kr
+        partitions: 6
+        cloud_topic: true
+        leader_pref: "racks:asia-northeast3"
+      - name: perf-global
+        partitions: 18
+        cloud_topic: true
+        leader_pref: ""
+      - name: perf-local-p6
+        partitions: 6
+        cloud_topic: false
+        leader_pref: ""
+      - name: perf-us-p12
+        partitions: 12
+        cloud_topic: true
+        leader_pref: "racks:us-east4"
+      - name: perf-us-p24
+        partitions: 24
+        cloud_topic: true
+        leader_pref: "racks:us-east4"
+      - name: perf-us-rf3
+        partitions: 6
+        cloud_topic: true
+        leader_pref: "racks:us-east4"
+  tasks:
+    - name: Create cloud topics with leader preference
+      ansible.builtin.command: >
+        rpk topic create {{ item.name }}
+        -p {{ item.partitions }}
+        -c redpanda.cloud_topic.enabled={{ item.cloud_topic | lower }}
+        {% if item.leader_pref %}-c redpanda.leaders.preference={{ item.leader_pref }}{% endif %}
+      loop: "{{ topics }}"
+      register: topic_create
+      changed_when: "'Created topic' in topic_create.stdout"
+      failed_when:
+        - topic_create.rc != 0
+        - "'TOPIC_ALREADY_EXISTS' not in topic_create.stderr"
+
+    - name: Set RF=3 on perf-us-rf3
+      ansible.builtin.command: rpk topic alter-config perf-us-rf3 -s replication.factor=3
+      register: result
+      failed_when: result.rc != 0 and 'UNKNOWN_TOPIC_OR_PARTITION' not in result.stderr
+      changed_when: result.rc == 0
+
+    - name: List created topics
+      ansible.builtin.command: rpk topic list
+      register: topic_list
+      changed_when: false
+
+    - name: Display topics
+      ansible.builtin.debug:
+        var: topic_list.stdout_lines
+
+- name: Deploy Data Transform for perf-global (optional)
+  hosts: redpanda[0]
+  become: true
+  tags: [transform, never]
+  tasks:
+    - name: Check if rpk transform is available
+      ansible.builtin.command: rpk transform list
+      register: transform_check
+      changed_when: false
+      failed_when: false
+
+    - name: Copy transform WASM binary
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../transforms/merge-to-global/merge_to_global.wasm"
+        dest: /tmp/merge_to_global.wasm
+        mode: "0644"
+      when: transform_check.rc == 0
+
+    - name: Deploy merge-us-to-global transform
+      ansible.builtin.command: >
+        rpk transform deploy /tmp/merge_to_global.wasm
+        --name merge-us-to-global
+        --input-topic perf-us
+        --output-topic perf-global
+      register: deploy_us
+      changed_when: deploy_us.rc == 0
+      failed_when: false
+      when: transform_check.rc == 0
+
+    - name: Deploy merge-eu-to-global transform
+      ansible.builtin.command: >
+        rpk transform deploy /tmp/merge_to_global.wasm
+        --name merge-eu-to-global
+        --input-topic perf-eu
+        --output-topic perf-global
+      register: deploy_eu
+      changed_when: deploy_eu.rc == 0
+      failed_when: false
+      when: transform_check.rc == 0
+
+    - name: Deploy merge-kr-to-global transform
+      ansible.builtin.command: >
+        rpk transform deploy /tmp/merge_to_global.wasm
+        --name merge-kr-to-global
+        --input-topic perf-kr
+        --output-topic perf-global
+      register: deploy_ap
+      changed_when: deploy_ap.rc == 0
+      failed_when: false
+      when: transform_check.rc == 0
+
+    - name: Show transform status
+      ansible.builtin.command: rpk transform list
+      register: transform_list
+      changed_when: false
+      when: transform_check.rc == 0
+
+    - name: Display transforms
+      ansible.builtin.debug:
+        var: transform_list.stdout_lines
+      when: transform_check.rc == 0

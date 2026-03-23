@@ -1,0 +1,436 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Kafka Produce Performance",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Produce Throughput (bytes/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(redpanda_kafka_request_bytes_total{redpanda_request=\"produce\"}[1m])) by (instance)",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "title": "Produce Latency (p50/p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(redpanda_kafka_request_latency_seconds_bucket{redpanda_request=\"produce\"}[1m])) by (le, instance))",
+          "legendFormat": "p50 {{instance}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(redpanda_kafka_request_latency_seconds_bucket{redpanda_request=\"produce\"}[1m])) by (le, instance))",
+          "legendFormat": "p99 {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "id": 3,
+      "title": "Produce Requests/s",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m])) by (instance)",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "id": 4,
+      "title": "Fetch Requests/s",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"fetch\"}[1m])) by (instance)",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "id": 101,
+      "title": "Cloud Storage (S3)",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "id": 5,
+      "title": "Cloud Storage Upload Throughput",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(redpanda_cloud_storage_uploaded_bytes[1m])) by (instance)",
+          "legendFormat": "upload {{instance}}"
+        },
+        {
+          "expr": "sum(rate(redpanda_cloud_storage_downloaded_bytes[1m])) by (instance)",
+          "legendFormat": "download {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "id": 6,
+      "title": "Cloud Storage Upload Latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(redpanda_cloud_storage_upload_latency_bucket[1m])) by (le, instance))",
+          "legendFormat": "p50 {{instance}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(redpanda_cloud_storage_upload_latency_bucket[1m])) by (le, instance))",
+          "legendFormat": "p99 {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "id": 7,
+      "title": "Cloud Storage Segment Uploads/Downloads",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(redpanda_cloud_storage_successful_uploads_total[1m])) by (instance)",
+          "legendFormat": "uploads {{instance}}"
+        },
+        {
+          "expr": "sum(rate(redpanda_cloud_storage_successful_downloads_total[1m])) by (instance)",
+          "legendFormat": "downloads {{instance}}"
+        },
+        {
+          "expr": "sum(rate(redpanda_cloud_storage_failed_uploads_total[1m])) by (instance)",
+          "legendFormat": "FAILED uploads {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": { "lineWidth": 2 },
+          "max": 1,
+          "min": 0
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "id": 8,
+      "title": "Cloud Storage Cache Hit Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(redpanda_cloud_storage_cache_hits_total[5m])) by (instance) / (sum(rate(redpanda_cloud_storage_cache_hits_total[5m])) by (instance) + sum(rate(redpanda_cloud_storage_cache_misses_total[5m])) by (instance))",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "id": 102,
+      "title": "Envoy Proxy",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "id": 9,
+      "title": "Envoy Upstream Requests/s (by response code)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=\"s3_mrap\"}[1m])) by (envoy_response_code_class, instance)",
+          "legendFormat": "{{envoy_response_code_class}}xx {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "id": 10,
+      "title": "Envoy S3 Upstream Latency (p50/p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=\"s3_mrap\"}[1m])) by (le, instance))",
+          "legendFormat": "p50 {{instance}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=\"s3_mrap\"}[1m])) by (le, instance))",
+          "legendFormat": "p99 {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "id": 11,
+      "title": "Envoy Active Connections",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "envoy_cluster_upstream_cx_active{envoy_cluster_name=\"s3_mrap\"}",
+          "legendFormat": "active {{instance}}"
+        },
+        {
+          "expr": "envoy_cluster_upstream_rq_pending_active{envoy_cluster_name=\"s3_mrap\"}",
+          "legendFormat": "pending {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
+      "id": 12,
+      "title": "Envoy Circuit Breaker Overflow",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(envoy_cluster_upstream_rq_retry{envoy_cluster_name=\"s3_mrap\"}[1m])) by (instance)",
+          "legendFormat": "retries {{instance}}"
+        },
+        {
+          "expr": "sum(rate(envoy_cluster_upstream_cx_overflow{envoy_cluster_name=\"s3_mrap\"}[1m])) by (instance)",
+          "legendFormat": "cx overflow {{instance}}"
+        },
+        {
+          "expr": "sum(rate(envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name=\"s3_mrap\"}[1m])) by (instance)",
+          "legendFormat": "rq overflow {{instance}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
+      "id": 103,
+      "title": "System Resources",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": { "lineWidth": 2 },
+          "max": 1,
+          "min": 0
+        }
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 52 },
+      "id": 13,
+      "title": "Broker CPU Usage",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "1 - avg(rate(node_cpu_seconds_total{mode=\"idle\", instance=~\".*:9100\"}[1m])) by (instance)",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 52 },
+      "id": 14,
+      "title": "Broker Network I/O",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(node_network_receive_bytes_total{device!~\"lo|veth.*\"}[1m])) by (instance)",
+          "legendFormat": "rx {{instance}}"
+        },
+        {
+          "expr": "sum(rate(node_network_transmit_bytes_total{device!~\"lo|veth.*\"}[1m])) by (instance)",
+          "legendFormat": "tx {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
+      "id": 15,
+      "title": "Broker Disk I/O",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(node_disk_read_bytes_total{device=~\"nvme.*\"}[1m])) by (instance)",
+          "legendFormat": "read {{instance}}"
+        },
+        {
+          "expr": "sum(rate(node_disk_written_bytes_total{device=~\"nvme.*\"}[1m])) by (instance)",
+          "legendFormat": "write {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
+      "id": 16,
+      "title": "Broker Memory Usage",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes{instance=~\".*:9100\"} - node_memory_MemAvailable_bytes{instance=~\".*:9100\"}",
+          "legendFormat": "used {{instance}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
+      "id": 17,
+      "title": "Redpanda Partition Leaders by Broker",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "redpanda_cluster_partition_leaders{instance=~\".*:9644\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["redpanda", "mrc", "perf-test"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "MRC Perf Test Overview",
+  "uid": "mrc-perf-test",
+  "version": 1
+}

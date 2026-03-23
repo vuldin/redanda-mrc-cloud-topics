@@ -1,0 +1,597 @@
+---
+# Performance test execution playbook.
+# Run specific phases using Ansible tags:
+#
+#   ansible-playbook ansible/perf-test-run.yml --tags phase1
+#   ansible-playbook ansible/perf-test-run.yml --tags phase2
+#   ansible-playbook ansible/perf-test-run.yml --tags phase3
+#   ansible-playbook ansible/perf-test-run.yml --tags phase4
+#
+# Individual sub-tests:
+#   ansible-playbook ansible/perf-test-run.yml --tags test_1_1
+#   ansible-playbook ansible/perf-test-run.yml --tags test_2_1
+#
+# Vars can be overridden:
+#   ansible-playbook ansible/perf-test-run.yml --tags phase2 -e "step_duration=300"
+
+# ============================================================
+# Phase 1: Hop Isolation (per-tier ceilings)
+# ============================================================
+
+- name: "Phase 1.1: Network throughput (iperf3)"
+  hosts: client_us
+  become: true
+  tags: [phase1, test_1_1]
+  vars:
+    test_name: "1.1-network-throughput"
+    duration: 30
+  tasks:
+    - name: Start iperf3 server on US broker
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no {{ broker_ip }} "nohup iperf3 -s -p 5201 -D" || true
+      changed_when: true
+      delegate_to: localhost
+      become: false
+      failed_when: false
+
+    - name: "Test 1.1a: Intra-region throughput (client -> local broker)"
+      ansible.builtin.shell: |
+        iperf3 -c {{ broker_ip }} -p 5201 -t {{ duration }} -P 4 -J \
+          > /opt/perf-results/{{ test_name }}-intra-region-$(date +%Y%m%d_%H%M%S).json 2>&1
+      register: iperf_intra
+
+    - name: Display intra-region result
+      ansible.builtin.debug:
+        msg: "Intra-region iperf3 completed (rc={{ iperf_intra.rc }})"
+
+- name: "Phase 1.2: NVMe write throughput (fio)"
+  hosts: redpanda[0]
+  become: true
+  tags: [phase1, test_1_2]
+  vars:
+    test_name: "1.2-nvme-throughput"
+  tasks:
+    - name: Run fio sequential write benchmark
+      ansible.builtin.shell: |
+        fio --name=seqwrite \
+          --ioengine=libaio \
+          --direct=1 \
+          --rw=write \
+          --bs=128k \
+          --numjobs=4 \
+          --size=1G \
+          --runtime=60 \
+          --time_based \
+          --group_reporting \
+          --filename=/mnt/vectorized/redpanda/fio-test \
+          --output-format=json \
+          > /tmp/{{ test_name }}-$(date +%Y%m%d_%H%M%S).json 2>&1
+      register: fio_result
+
+    - name: Fetch fio results
+      ansible.builtin.fetch:
+        src: "/tmp/{{ test_name }}-*.json"
+        dest: "/opt/perf-results/"
+        flat: true
+      failed_when: false
+
+    - name: Clean up fio test file
+      ansible.builtin.file:
+        path: /mnt/vectorized/redpanda/fio-test
+        state: absent
+
+  hosts: redpanda[0]
+  become: true
+  tags: [phase1, test_1_3]
+  vars:
+  tasks:
+    - name: Generate 10MB test file
+      ansible.builtin.shell: dd if=/dev/urandom of=/tmp/s3-test-10mb bs=1M count=10
+
+      ansible.builtin.shell: |
+        RESULTS_FILE="/tmp/{{ test_name }}-$(date +%Y%m%d_%H%M%S).txt"
+        echo "File size: 10MB, 10 sequential PUTs" >> "$RESULTS_FILE"
+        echo "---" >> "$RESULTS_FILE"
+        for i in $(seq 1 10); do
+          START=$(date +%s%N)
+          curl -s -o /dev/null -w "%{http_code} %{time_total}s %{speed_upload}B/s" \
+            -X PUT \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @/tmp/s3-test-10mb \
+            >> "$RESULTS_FILE"
+          END=$(date +%s%N)
+          ELAPSED=$(( (END - START) / 1000000 ))
+          echo " elapsed=${ELAPSED}ms" >> "$RESULTS_FILE"
+        done
+        cat "$RESULTS_FILE"
+
+      ansible.builtin.debug:
+
+    - name: Clean up test file
+      ansible.builtin.file:
+        path: /tmp/s3-test-10mb
+        state: absent
+
+- name: "Phase 1.5: Redpanda without cloud topics (local baseline)"
+  hosts: client_us
+  become: true
+  tags: [phase1, test_1_5]
+  vars:
+    test_name: "1.5-local-topic-baseline"
+    step_duration: 60
+  tasks:
+    - name: Run mrc-bench on local (non-cloud) topic
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-local-p6 \
+          --record-size 1024 \
+          --rate 0 \
+          --duration {{ step_duration }}s \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --output /opt/perf-results/{{ test_name }}-$(date +%Y%m%d_%H%M%S).json
+      register: local_bench
+      timeout: 120
+
+    - name: Display local baseline results
+      ansible.builtin.debug:
+        var: local_bench.stdout_lines
+
+# ============================================================
+# Phase 2: Progressive Producer Load Tests
+# ============================================================
+
+- name: "Phase 2.1: Single-region local produce (US -> perf-us)"
+  hosts: client_us
+  become: true
+  tags: [phase2, test_2_1]
+  vars:
+    test_name: "2.1-single-region-produce"
+    step_duration: "{{ step_duration | default(300) }}"
+    rates: "100,500,1000,2000,5000,10000,0"
+    record_size: 1024
+  tasks:
+    - name: Run stepped ramp-up produce test
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        for RATE in $(echo "{{ rates }}" | tr ',' ' '); do
+          LABEL="rate-${RATE}"
+          [ "$RATE" = "0" ] && LABEL="rate-uncapped"
+          echo "=== Step: $LABEL ==="
+          mrc-bench produce \
+            --brokers {{ broker_ip }}:9092 \
+            --topic perf-us \
+            --record-size {{ record_size }} \
+            --rate "$RATE" \
+            --duration {{ step_duration }}s \
+            --acks all \
+            --compression lz4 \
+            --linger 5ms \
+            --output /opt/perf-results/{{ test_name }}-${LABEL}-${TIMESTAMP}.json
+          echo "=== Cooldown 30s ==="
+          sleep 30
+        done
+      register: ramp_result
+      timeout: 3600
+
+    - name: Display ramp-up results
+      ansible.builtin.debug:
+        var: ramp_result.stdout_lines
+
+- name: "Phase 2.2: All regions producing locally in parallel"
+  hosts: client
+  become: true
+  tags: [phase2, test_2_2]
+  vars:
+    test_name: "2.2-all-regions-parallel"
+    step_duration: "{{ step_duration | default(300) }}"
+    rates: "100,500,1000,2000,5000,10000,0"
+    record_size: 1024
+    topic_map:
+      us-east4: perf-us
+      europe-west1: perf-eu
+      asia-northeast3: perf-kr
+  tasks:
+    - name: Run parallel produce test (each region to own topic)
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TOPIC="{{ topic_map[rack] }}"
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        for RATE in $(echo "{{ rates }}" | tr ',' ' '); do
+          LABEL="rate-${RATE}"
+          [ "$RATE" = "0" ] && LABEL="rate-uncapped"
+          echo "=== [{{ rack }}] Step: $LABEL -> $TOPIC ==="
+          mrc-bench produce \
+            --brokers {{ broker_ip }}:9092 \
+            --topic "$TOPIC" \
+            --record-size {{ record_size }} \
+            --rate "$RATE" \
+            --duration {{ step_duration }}s \
+            --acks all \
+            --compression lz4 \
+            --linger 5ms \
+            --output /opt/perf-results/{{ test_name }}-{{ rack }}-${LABEL}-${TIMESTAMP}.json
+          echo "=== Cooldown 30s ==="
+          sleep 30
+        done
+      register: parallel_result
+      timeout: 3600
+
+- name: "Phase 2.3: Local topic baseline comparison (US -> perf-local-p6)"
+  hosts: client_us
+  become: true
+  tags: [phase2, test_2_3]
+  vars:
+    test_name: "2.3-local-baseline-compare"
+    step_duration: "{{ step_duration | default(300) }}"
+    rates: "100,500,1000,2000,5000,10000,0"
+  tasks:
+    - name: Run ramp-up on non-cloud topic
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        for RATE in $(echo "{{ rates }}" | tr ',' ' '); do
+          LABEL="rate-${RATE}"
+          [ "$RATE" = "0" ] && LABEL="rate-uncapped"
+          echo "=== Step: $LABEL ==="
+          mrc-bench produce \
+            --brokers {{ broker_ip }}:9092 \
+            --topic perf-local-p6 \
+            --record-size 1024 \
+            --rate "$RATE" \
+            --duration {{ step_duration }}s \
+            --acks all \
+            --compression lz4 \
+            --linger 5ms \
+            --output /opt/perf-results/{{ test_name }}-${LABEL}-${TIMESTAMP}.json
+          sleep 30
+        done
+      register: baseline_result
+      timeout: 3600
+
+- name: "Phase 2.4: Message size sweep (US -> perf-us)"
+  hosts: client_us
+  become: true
+  tags: [phase2, test_2_4]
+  vars:
+    test_name: "2.4-msg-size-sweep"
+    step_duration: "{{ step_duration | default(300) }}"
+    sizes: "128,1024,10240,102400,1048576"
+  tasks:
+    - name: Run message size sweep
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        for SIZE in $(echo "{{ sizes }}" | tr ',' ' '); do
+          echo "=== Message size: ${SIZE}B ==="
+          mrc-bench produce \
+            --brokers {{ broker_ip }}:9092 \
+            --topic perf-us \
+            --record-size "$SIZE" \
+            --rate 0 \
+            --duration {{ step_duration }}s \
+            --acks all \
+            --compression lz4 \
+            --linger 5ms \
+            --output /opt/perf-results/{{ test_name }}-size-${SIZE}-${TIMESTAMP}.json
+          sleep 30
+        done
+      register: size_sweep
+      timeout: 3600
+
+- name: "Phase 2.5: Partition count sweep (US -> perf-us variants)"
+  hosts: client_us
+  become: true
+  tags: [phase2, test_2_5]
+  vars:
+    test_name: "2.5-partition-sweep"
+    step_duration: "{{ step_duration | default(300) }}"
+    topics_partitions:
+      - { topic: "perf-us", partitions: 6 }
+      - { topic: "perf-us-p12", partitions: 12 }
+      - { topic: "perf-us-p24", partitions: 24 }
+  tasks:
+    - name: Run partition count sweep
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        {% for tp in topics_partitions %}
+        echo "=== Topic: {{ tp.topic }} ({{ tp.partitions }}p) ==="
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic {{ tp.topic }} \
+          --record-size 1024 \
+          --rate 0 \
+          --duration {{ step_duration }}s \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --output /opt/perf-results/{{ test_name }}-{{ tp.topic }}-${TIMESTAMP}.json
+        sleep 30
+        {% endfor %}
+      register: partition_sweep
+      timeout: 3600
+
+- name: "Phase 2.6: RF comparison (RF=1 vs RF=3 on cloud topics)"
+  hosts: client_us
+  become: true
+  tags: [phase2, test_2_6]
+  vars:
+    test_name: "2.6-rf-comparison"
+    step_duration: "{{ step_duration | default(300) }}"
+  tasks:
+    - name: Run RF=1 benchmark (perf-us)
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        echo "=== RF=1 (perf-us) ==="
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-us \
+          --record-size 1024 \
+          --rate 0 \
+          --duration {{ step_duration }}s \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --output /opt/perf-results/{{ test_name }}-rf1-${TIMESTAMP}.json
+      register: rf1_result
+      timeout: 600
+
+    - name: Cooldown between RF tests
+      ansible.builtin.pause:
+        seconds: 60
+
+    - name: Run RF=3 benchmark (perf-us-rf3)
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        echo "=== RF=3 (perf-us-rf3) ==="
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-us-rf3 \
+          --record-size 1024 \
+          --rate 0 \
+          --duration {{ step_duration }}s \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --output /opt/perf-results/{{ test_name }}-rf3-${TIMESTAMP}.json
+      register: rf3_result
+      timeout: 600
+
+# ============================================================
+# Phase 3: Consumer Tests
+# ============================================================
+
+- name: "Phase 3.1: Local consume from leader (US)"
+  hosts: client_us
+  become: true
+  tags: [phase3, test_3_1]
+  vars:
+    test_name: "3.1-local-consume-us"
+    duration: "{{ step_duration | default(300) }}"
+  tasks:
+    - name: Pre-populate perf-us with data
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-us \
+          --record-size 1024 \
+          --rate 0 \
+          --duration 60s \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --output /dev/null
+      timeout: 120
+
+    - name: Run consume benchmark
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-us \
+          --group perf-consume-us-{{ ansible_date_time.epoch }} \
+          --duration {{ duration }}s \
+          --output /opt/perf-results/{{ test_name }}-$(date +%Y%m%d_%H%M%S).json
+      register: consume_result
+      timeout: 600
+
+- name: "Phase 3.3: All regions consuming locally in parallel"
+  hosts: client
+  become: true
+  tags: [phase3, test_3_3]
+  vars:
+    test_name: "3.3-all-regions-consume"
+    duration: "{{ step_duration | default(300) }}"
+    topic_map:
+      us-east4: perf-us
+      europe-west1: perf-eu
+      asia-northeast3: perf-kr
+  tasks:
+    - name: Run parallel consume test
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TOPIC="{{ topic_map[rack] }}"
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic "$TOPIC" \
+          --group perf-consume-{{ rack }}-{{ ansible_date_time.epoch }} \
+          --duration {{ duration }}s \
+          --output /opt/perf-results/{{ test_name }}-{{ rack }}-$(date +%Y%m%d_%H%M%S).json
+      register: parallel_consume
+      timeout: 600
+
+- name: "Phase 3.5: CRR lag test (burst to US, measure AP catch-up via perf-global)"
+  hosts: client_us
+  become: true
+  tags: [phase3, test_3_5]
+  vars:
+    test_name: "3.5-crr-lag-test"
+    burst_count: 100000
+  tasks:
+    - name: Record burst start timestamp
+      ansible.builtin.shell: date +%s%N
+      register: burst_start
+
+    - name: Burst 100K messages to perf-us
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-us \
+          --record-size 1024 \
+          --count {{ burst_count }} \
+          --rate 0 \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --output /opt/perf-results/{{ test_name }}-produce-$(date +%Y%m%d_%H%M%S).json
+      register: burst_result
+      timeout: 300
+
+    - name: Record burst end timestamp
+      ansible.builtin.shell: date +%s%N
+      register: burst_end
+
+    - name: Save burst timestamps
+      ansible.builtin.copy:
+        dest: /opt/perf-results/{{ test_name }}-timestamps.txt
+        content: |
+          burst_start={{ burst_start.stdout }}
+          burst_end={{ burst_end.stdout }}
+          burst_count={{ burst_count }}
+        mode: "0644"
+
+# AP consumer for CRR lag measurement
+- name: "Phase 3.5 (AP): Measure CRR lag from AP"
+  hosts: client_ap
+  become: true
+  tags: [phase3, test_3_5]
+  vars:
+    test_name: "3.5-crr-lag-ap-consume"
+  tasks:
+    - name: Consume from perf-global and measure lag
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-global \
+          --group perf-crr-lag-{{ ansible_date_time.epoch }} \
+          --duration 600s \
+          --output /opt/perf-results/{{ test_name }}-$(date +%Y%m%d_%H%M%S).json
+      register: crr_consume
+      timeout: 660
+
+# ============================================================
+# Phase 4: Combined Produce + Consume
+# ============================================================
+
+- name: "Phase 4.2: All regions produce + consume locally in parallel"
+  hosts: client
+  become: true
+  tags: [phase4, test_4_2]
+  vars:
+    test_name: "4.2-all-regions-combined"
+    step_duration: "{{ step_duration | default(300) }}"
+    rates: "100,500,1000,2000,5000,0"
+    topic_map:
+      us-east4: perf-us
+      europe-west1: perf-eu
+      asia-northeast3: perf-kr
+  tasks:
+    - name: Run combined produce + consume
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TOPIC="{{ topic_map[rack] }}"
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+        # Start consumer in background
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic "$TOPIC" \
+          --group perf-combined-{{ rack }}-{{ ansible_date_time.epoch }} \
+          --duration 2400s \
+          --output /opt/perf-results/{{ test_name }}-{{ rack }}-consume-${TIMESTAMP}.json &
+        CONSUMER_PID=$!
+
+        # Ramp-up producer
+        for RATE in $(echo "{{ rates }}" | tr ',' ' '); do
+          LABEL="rate-${RATE}"
+          [ "$RATE" = "0" ] && LABEL="rate-uncapped"
+          echo "=== [{{ rack }}] Produce step: $LABEL ==="
+          mrc-bench produce \
+            --brokers {{ broker_ip }}:9092 \
+            --topic "$TOPIC" \
+            --record-size 1024 \
+            --rate "$RATE" \
+            --duration {{ step_duration }}s \
+            --acks all \
+            --compression lz4 \
+            --linger 5ms \
+            --output /opt/perf-results/{{ test_name }}-{{ rack }}-produce-${LABEL}-${TIMESTAMP}.json
+          sleep 30
+        done
+
+        # Stop consumer
+        kill $CONSUMER_PID 2>/dev/null || true
+        wait $CONSUMER_PID 2>/dev/null || true
+      register: combined_result
+      timeout: 3600
+
+- name: "Phase 4.3: Full stress (all regions, local + global)"
+  hosts: client
+  become: true
+  tags: [phase4, test_4_3]
+  vars:
+    test_name: "4.3-full-stress"
+    duration: "{{ step_duration | default(300) }}"
+    topic_map:
+      us-east4: perf-us
+      europe-west1: perf-eu
+      asia-northeast3: perf-kr
+  tasks:
+    - name: Run full stress test
+      ansible.builtin.shell: |
+        export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+        TOPIC="{{ topic_map[rack] }}"
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+        # Consume local topic
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic "$TOPIC" \
+          --group perf-stress-local-{{ rack }}-{{ ansible_date_time.epoch }} \
+          --duration {{ duration }}s \
+          --output /opt/perf-results/{{ test_name }}-{{ rack }}-consume-local-${TIMESTAMP}.json &
+
+        # Consume global topic
+        mrc-bench consume \
+          --brokers {{ broker_ip }}:9092 \
+          --topic perf-global \
+          --group perf-stress-global-{{ rack }}-{{ ansible_date_time.epoch }} \
+          --duration {{ duration }}s \
+          --output /opt/perf-results/{{ test_name }}-{{ rack }}-consume-global-${TIMESTAMP}.json &
+
+        # Produce to local topic at max rate
+        mrc-bench produce \
+          --brokers {{ broker_ip }}:9092 \
+          --topic "$TOPIC" \
+          --record-size 1024 \
+          --rate 0 \
+          --duration {{ duration }}s \
+          --acks all \
+          --compression lz4 \
+          --linger 5ms \
+          --output /opt/perf-results/{{ test_name }}-{{ rack }}-produce-${TIMESTAMP}.json
+
+        # Wait for background consumers
+        wait
+      register: stress_result
+      timeout: 600

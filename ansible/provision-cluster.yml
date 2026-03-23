@@ -1,25 +1,24 @@
 ---
-- name: Provision Redpanda MRC cluster
+- name: Provision Redpanda MRC cluster (GCP / Cloud Topics)
   hosts: redpanda
   vars:
     advertise_public_ips: false
     redpanda_version: "{{ lookup('env', 'REDPANDA_VERSION') | default('25.3.9-1', true) }}"
 
     # Seed servers: first broker from each region
-    # These are set in the inventory via envoy_endpoint and private_ip
     redpanda_rack: "{{ rack }}"
     enable_rack_awareness: true
 
-    # Cloud storage via Envoy proxy
-    cloud_storage_enabled: true
-    cloud_storage_credentials_source: aws_instance_metadata
+    # Cloud storage via GCS (direct, no proxy needed)
+    # The redpanda.cluster.redpanda_broker role uses tiered_storage_bucket_name
+    # to set cloud_storage_bucket and auto-enable cloud_storage_enabled=true.
+    # Setting cloud_storage_credentials_source to gcp_instance_metadata also
+    # auto-sets cloud_storage_api_endpoint to storage.googleapis.com.
+    tiered_storage_bucket_name: "{{ gcs_bucket_name }}"
+    cloud_storage_credentials_source: gcp_instance_metadata
     cloud_storage_region: "{{ cloud_storage_region }}"
-    cloud_storage_disable_tls: true
-    cloud_storage_api_endpoint: "{{ envoy_endpoint.split(':')[0] }}"
-    cloud_storage_api_endpoint_port: "{{ envoy_endpoint.split(':')[1] }}"
-    cloud_storage_bucket: "none"
 
-    # WAN-tuned Raft settings
+    # WAN-tuned Raft settings for cross-region replication
     raft_heartbeat_interval_ms: 500
     election_timeout_ms: 5000
 

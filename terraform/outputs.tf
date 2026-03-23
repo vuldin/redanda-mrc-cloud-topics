@@ -1,77 +1,98 @@
-output "broker_us_public_ips" {
+# Broker public IPs
+output "broker_public_ips_us" {
   description = "Public IPs of US brokers"
-  value       = aws_instance.broker_us[*].public_ip
+  value       = google_compute_instance.broker_us[*].network_interface[0].access_config[0].nat_ip
 }
 
-output "broker_eu_public_ips" {
+output "broker_public_ips_eu" {
   description = "Public IPs of EU brokers"
-  value       = aws_instance.broker_eu[*].public_ip
+  value       = google_compute_instance.broker_eu[*].network_interface[0].access_config[0].nat_ip
 }
 
-output "broker_ap_public_ips" {
-  description = "Public IPs of AP brokers"
-  value       = aws_instance.broker_ap[*].public_ip
+output "broker_public_ips_kr" {
+  description = "Public IPs of KR brokers"
+  value       = google_compute_instance.broker_kr[*].network_interface[0].access_config[0].nat_ip
 }
 
-output "client_us_public_ip" {
+# Broker private IPs
+output "broker_private_ips_us" {
+  description = "Private IPs of US brokers"
+  value       = google_compute_instance.broker_us[*].network_interface[0].network_ip
+}
+
+output "broker_private_ips_eu" {
+  description = "Private IPs of EU brokers"
+  value       = google_compute_instance.broker_eu[*].network_interface[0].network_ip
+}
+
+output "broker_private_ips_kr" {
+  description = "Private IPs of KR brokers"
+  value       = google_compute_instance.broker_kr[*].network_interface[0].network_ip
+}
+
+# Client IPs
+output "client_ip_us" {
   description = "Public IP of US client"
-  value       = aws_instance.client_us.public_ip
+  value       = google_compute_instance.client_us.network_interface[0].access_config[0].nat_ip
 }
 
-output "client_eu_public_ip" {
+output "client_ip_eu" {
   description = "Public IP of EU client"
-  value       = aws_instance.client_eu.public_ip
+  value       = google_compute_instance.client_eu.network_interface[0].access_config[0].nat_ip
 }
 
-output "client_ap_public_ip" {
-  description = "Public IP of AP client"
-  value       = aws_instance.client_ap.public_ip
+output "client_ip_kr" {
+  description = "Public IP of KR client"
+  value       = google_compute_instance.client_kr.network_interface[0].access_config[0].nat_ip
 }
 
-output "monitor_public_ip" {
+# Monitor
+output "monitor_ip" {
   description = "Public IP of monitoring instance"
-  value       = aws_instance.monitor.public_ip
+  value       = google_compute_instance.monitor.network_interface[0].access_config[0].nat_ip
 }
 
 output "grafana_url" {
-  description = "Grafana URL"
-  value       = "http://${aws_instance.monitor.public_ip}:3000"
+  description = "Grafana dashboard URL"
+  value       = "http://${google_compute_instance.monitor.network_interface[0].access_config[0].nat_ip}:3000"
 }
 
 output "prometheus_url" {
   description = "Prometheus URL"
-  value       = "http://${aws_instance.monitor.public_ip}:9090"
+  value       = "http://${google_compute_instance.monitor.network_interface[0].access_config[0].nat_ip}:9090"
 }
 
-output "mrap_alias" {
-  description = "S3 Multi-Region Access Point alias"
-  value       = aws_s3control_multi_region_access_point.mrap.alias
+# GCS
+output "gcs_bucket_name" {
+  description = "GCS bucket for Cloud Topics"
+  value       = google_storage_bucket.cloud_topics.name
 }
 
-output "mrap_endpoint" {
-  description = "S3 MRAP endpoint"
-  value       = "${aws_s3control_multi_region_access_point.mrap.alias}.accesspoint.s3-global.amazonaws.com"
-}
-
+# SSH commands
 output "ssh_commands" {
   description = "SSH commands for all instances"
   value = {
-    broker_us = [for ip in aws_instance.broker_us[*].public_ip : "ssh -i <key> ${var.ssh_user}@${ip}"]
-    broker_eu = [for ip in aws_instance.broker_eu[*].public_ip : "ssh -i <key> ${var.ssh_user}@${ip}"]
-    broker_ap = [for ip in aws_instance.broker_ap[*].public_ip : "ssh -i <key> ${var.ssh_user}@${ip}"]
-    monitor   = "ssh -i <key> ${var.ssh_user}@${aws_instance.monitor.public_ip}"
+    broker_us = [for inst in google_compute_instance.broker_us : "ssh -i ${var.ssh_public_key_path} ${var.ssh_user}@${inst.network_interface[0].access_config[0].nat_ip}"]
+    broker_eu = [for inst in google_compute_instance.broker_eu : "ssh -i ${var.ssh_public_key_path} ${var.ssh_user}@${inst.network_interface[0].access_config[0].nat_ip}"]
+    broker_kr = [for inst in google_compute_instance.broker_kr : "ssh -i ${var.ssh_public_key_path} ${var.ssh_user}@${inst.network_interface[0].access_config[0].nat_ip}"]
+    client_us = "ssh -i ${var.ssh_public_key_path} ${var.ssh_user}@${google_compute_instance.client_us.network_interface[0].access_config[0].nat_ip}"
+    client_eu = "ssh -i ${var.ssh_public_key_path} ${var.ssh_user}@${google_compute_instance.client_eu.network_interface[0].access_config[0].nat_ip}"
+    client_kr = "ssh -i ${var.ssh_public_key_path} ${var.ssh_user}@${google_compute_instance.client_kr.network_interface[0].access_config[0].nat_ip}"
+    monitor   = "ssh -i ${var.ssh_public_key_path} ${var.ssh_user}@${google_compute_instance.monitor.network_interface[0].access_config[0].nat_ip}"
   }
 }
 
+# Seed servers
 output "seed_servers" {
-  description = "Seed server IPs (one from each region)"
-  value = [
-    aws_instance.broker_us[0].private_ip,
-    aws_instance.broker_eu[0].private_ip,
-    aws_instance.broker_ap[0].private_ip,
-  ]
+  description = "Seed server addresses for Redpanda cluster bootstrap"
+  value = concat(
+    [for inst in google_compute_instance.broker_us : "${inst.network_interface[0].network_ip}:33145"],
+    [for inst in google_compute_instance.broker_eu : "${inst.network_interface[0].network_ip}:33145"],
+    [for inst in google_compute_instance.broker_kr : "${inst.network_interface[0].network_ip}:33145"]
+  )
 }
 
+# Inventory file
 output "inventory_file" {
   description = "Path to generated Ansible inventory"
   value       = local_file.ansible_inventory.filename
